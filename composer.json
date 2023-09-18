@@ -1,0 +1,15 @@
+{
+    "name": "ozplugin/settings",
+    "autoload": {
+        "psr-4": {
+            "Ozplugin\\Core\\": "src/"
+        }
+    },
+    "authors": [
+        {
+            "name": "Ozplugin",
+            "email": "client@ozplugin.ru"
+        }
+    ],
+    "require": {}
+}
