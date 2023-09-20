@@ -61,7 +61,7 @@ class Settings
     public $page_icon = 'dashicons-admin-settings';
 
     public $page_priority = 10;
-    
+
     /**
      * Creating WP settings page
      *
@@ -69,37 +69,39 @@ class Settings
      * @param  string $capability Permission who can see this page. By default is administrator
      * @param  string $menu_slug The slug name to refer to this menu by. Should be unique for this menu page and only include lowercase alphanumeric, dashes, and underscores characters to be compatible with sanitize_key() .
      * @param  string $icon The URL to the icon to be used for this menu.
-                            *Pass a base64-encoded SVG using a data URI, which will be colored to match the color scheme. This should begin with 'data:image/svg+xml;base64,'.
-                            *Pass the name of a Dashicons helper class to use a font icon, e.g. 'dashicons-chart-pie'.
-                            *Pass 'none' to leave div.wp-menu-image empty so an icon can be added via CSS.
+     *Pass a base64-encoded SVG using a data URI, which will be colored to match the color scheme. This should begin with 'data:image/svg+xml;base64,'.
+     *Pass the name of a Dashicons helper class to use a font icon, e.g. 'dashicons-chart-pie'.
+     *Pass 'none' to leave div.wp-menu-image empty so an icon can be added via CSS.
      * @param  int $priority The position in the menu order this item should appear.
      * @return void
      */
-    public function add_page($name, $capability = 'administrator', $menu_slug = '', $icon = 'dashicons-admin-settings', $priority = 10) {
+    public function add_page($name, $capability = "administrator", $menu_slug = "", $icon = "dashicons-admin-settings", $priority = 10)
+    {
         if (!$name) return new WP_Error('name_missed', 'Name of setings page is required');
-        add_action( 'admin_menu', [$this, 'add_menu_page'] );
         $this->page_name = $name;
         $this->page_capability = $capability;
         $this->menu_slug = $menu_slug ?: static::FILE;
         $this->page_icon = $icon;
         $this->page_priority = $priority;
+        add_action('admin_menu', [$this, 'add_menu_page']);
     }
-    
+
     /**
      * Adding menu page
      *
      * @return void
      */
-    public function add_menu_page() {
+    public function add_menu_page()
+    {
         add_menu_page(
             $this->page_name,
-            $this->page_name, 
-            $this->page_capability, 
-            $this->menu_slug, 
+            $this->page_name,
+            $this->page_capability,
+            $this->menu_slug,
             [$this, 'page'],
             $this->page_icon,
             $this->page_priority
-        );  
+        );
     }
 
 
@@ -278,12 +280,21 @@ class Settings
                     $value = $values;
                     $name = $key;
                 }
-                $suc = $name && isset($_POST['value']) ? update_option($name, $value) : false;
-                $res = [
-                    'success' => $name && isset($_POST['value']),
-                    'value' => $value,
-                    'text' => !$suc ? 'Error with saving' : '',
-                ];
+                $old_option = get_option($name);
+                if (maybe_serialize($value) == maybe_serialize($old_option)) {
+                    $res = [
+                        'success' => true,
+                        'value' => '',
+                        'text' => 'There are no changes',
+                    ];
+                } else {
+                    $suc = $name && isset($_POST['value']) ? update_option($name, $value) : false;
+                    $res = [
+                        'success' => $name && isset($_POST['value']) && $suc,
+                        'value' => $value,
+                        'text' => !$suc ? 'Error with saving' : '',
+                    ];
+                }
             } else {
                 $res = [
                     'success' => false,
@@ -335,38 +346,49 @@ class Settings
      */
     public function scripts()
     {
-        wp_enqueue_script(
-            static::PREFIX . 'settings',
-            plugins_url('/', static::FILE) . 'assets/js/admin.js',
-            [],
-            static::VER
-        );
-        $lang = $this->getStrings();
-        $vars = [
-            'logo' => [
-                'img' => wp_get_attachment_image_url(get_theme_mod('custom_logo'), 'full'),
-                'url' => get_admin_url()
-            ],
-            'adminAjax' => admin_url('admin-ajax.php'),
-            'adminURL' => get_admin_url(),
-            'nonce' => wp_create_nonce('ozplugin-nonce'),
-            'settings' => $this->getOptions(),
-            'customNotice' => [
-                'variant' => 'warning',
-                'text' => 'custom notice'
-            ],
-        ];
-        wp_localize_script(static::PREFIX . 'settings', 'ozplugin_vars', apply_filters(static::PREFIX . 'plugin_vars', $vars));
-        wp_localize_script(static::PREFIX . 'settings', 'ozplugin_lang', apply_filters(static::PREFIX . 'plugin_lang', $lang));
+        $screen = function_exists('get_current_screen') ? get_current_screen() : false;
+        $base = $screen && $screen->base ? str_replace('toplevel_page_', '', $screen->base) : '';
+        if ($base && strpos($this->menu_slug, '.php') !== false) {
+            $base = $base . '.php';
+        }
+        if ($base && wp_normalize_path($base) == wp_normalize_path($this->menu_slug) || apply_filters(static::PREFIX . 'enqueue_settings_scripts', false)) {
+            $abs_url = wp_normalize_path(dirname(__FILE__));
+            $ABSPATH = wp_normalize_path(ABSPATH);
+            $abs_url = str_replace($ABSPATH, '', $abs_url);
+            wp_enqueue_script(
+                static::PREFIX . 'settings',
+                site_url('/') . $abs_url . '/assets/js/admin.js',
+                [],
+                static::VER
+            );
+            $lang = $this->getStrings();
+            $vars = [
+                'logo' => [
+                    'img' => wp_get_attachment_image_url(get_theme_mod('custom_logo'), 'full'),
+                    'url' => get_admin_url()
+                ],
+                'adminAjax' => admin_url('admin-ajax.php'),
+                'adminURL' => get_admin_url(),
+                'nonce' => wp_create_nonce('ozplugin-nonce'),
+                'settings' => $this->getOptions(),
+                'customNotice' => [
+                    'variant' => 'warning',
+                    'text' => 'custom notice'
+                ],
+            ];
+            wp_localize_script(static::PREFIX . 'settings', 'ozplugin_vars', apply_filters(static::PREFIX . 'plugin_vars', $vars));
+            wp_localize_script(static::PREFIX . 'settings', 'ozplugin_lang', apply_filters(static::PREFIX . 'plugin_lang', $lang));
+        }
     }
-    
+
     /**
      * Genereate select option from array
      *
      * @param  array $arr key => value
      * @return array
      */
-    public static function arrayToSelect($arr = []) {
+    public static function arrayToSelect($arr = [])
+    {
         $options = [];
         if (is_array($arr)) {
             foreach ($arr as $label => $ar) {
@@ -393,5 +415,43 @@ class Settings
             'nosettingsthistab' => 'No settings in this tab.',
             'copied' => 'Copied',
         ];
+    }
+
+    public static function Editor($text = '', $option_name = '')
+    {
+        $hash = wp_hash($option_name);
+        ob_start();
+        wp_editor(
+            $text,
+            $hash,
+            [
+                'textarea_name' => $option_name,
+                'editor_height' => 425,
+                'wpautop' => false,
+                'tinymce' => [
+                    'forced_root_block' => false,
+                    //'valid_elements' => '*[*]',
+                    //'valid_elements' => 'head,html,body,meta,img[class=myclass|!src|border:0|alt|title|width|height|style]',
+                ],
+                'editor_css' => 0,
+                'editor_class' => 'ozplugin_editor'
+            ]
+        );
+?>
+        <div data-option="<?php echo $option_name; ?>" data-id="<?php echo $option_name; ?>_editor" class="oz_set_defemail btn btn-primary btn-sm my-2"><?php _e('Load default template', 'oz-donator'); ?></div>
+<?php
+        $editor = ob_get_clean();
+        return $editor;
+    }
+
+    public function opts($name = '')
+    {
+        $name = preg_replace('/\[|]/m', ' ', $name);
+        $name = explode(' ', $name);
+        if (isset($name[1])) {
+            return isset(get_option($name[0])[$name[1]]) ? get_option($name[0])[$name[1]] : '';
+        } else {
+            return get_option($name);
+        }
     }
 }
