@@ -24,6 +24,8 @@ use WP_Error;
  *              title: '',
  *              description: '',
  *              order: '',
+ *              col: 2, // todo how it works?
+ *              grid: 1, // todo how it works?
  *              fields: [
  *                      name: '',
  *                      value: '',
@@ -417,6 +419,13 @@ class Settings
         ];
     }
 
+    /**
+     * Render wp_editor as option type
+     *
+     * @param  string $text default editor value
+     * @param  string $option_name Option name
+     * @return string html code
+     */
     public static function Editor($text = '', $option_name = '')
     {
         $hash = wp_hash($option_name);
@@ -444,14 +453,23 @@ class Settings
         return $editor;
     }
 
-    public function opts($name = '')
+    /**
+     * Return get_option value. If needs value from array $name should be like name[key]
+     *
+     * @param  string $name option key
+     * @param  string $def default value if option does not exist
+     * @return mixed
+     */
+    public function opts($name = '', $def = '')
     {
         $name = preg_replace('/\[|]/m', ' ', $name);
         $name = explode(' ', $name);
         if (isset($name[1])) {
-            return isset(get_option($name[0])[$name[1]]) ? get_option($name[0])[$name[1]] : '';
+            $default = [];
+            $default[$name[1]] = $def;
+            return isset(get_option($name[0], $default)[$name[1]]) ? get_option($name[0], $default)[$name[1]] : '';
         } else {
-            return get_option($name);
+            return get_option($name, $def);
         }
     }
 }
