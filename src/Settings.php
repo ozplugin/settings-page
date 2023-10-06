@@ -4,12 +4,13 @@
  * @author    Ozplugin <client@oz-plugin.ru>
  * @link      https://oz-plugin.com/
  * @copyright 2023 Ozplugin
- * @ver 1.0
+ * @ver 1.1
  */
 
 namespace Ozplugin\Core;
 
 use WP_Error;
+use WP_Query;
 
 /**
  * settings structure
@@ -29,7 +30,7 @@ use WP_Error;
  *              fields: [
  *                      name: '',
  *                      value: '',
- *                      type: '', input,textarea,select,checkbox,color,switch,html,shortcodes
+ *                      type: '', input,textarea,select,checkbox,color,switch,html,shortcodes,text
  *                      multiple: '',
  *                      title: '',
  *                      description: '',
@@ -63,6 +64,16 @@ class Settings
     public $page_icon = 'dashicons-admin-settings';
 
     public $page_priority = 10;
+
+    public function __construct()
+    {
+        $this->registerHooks();
+    }
+
+    protected function registerHooks()
+    {
+        return false;
+    }
 
     /**
      * Creating WP settings page
@@ -143,6 +154,11 @@ class Settings
         return apply_filters(static::PREFIX . 'plugin_settings', $options);
     }
 
+    protected function canDoThis()
+    {
+        return wp_doing_ajax() && wp_verify_nonce($_POST['_wpnonce'], 'ozplugin-nonce');
+    }
+
     /**
      * Function to add options in child classes
      * settings structure
@@ -198,6 +214,13 @@ class Settings
     public function registerAjaxHook()
     {
         add_action('wp_ajax_ozplugin_save_option', [$this, 'save']);
+        add_action('wp_ajax_ozplugin_get_table', [$this, 'getTable']);
+        add_action('wp_ajax_ozplugin_get_post', [$this, 'getPost']);
+        add_action('wp_ajax_ozplugin_save_post_data', [$this, 'savePostData']);
+        add_action('wp_ajax_ozplugin_save_post', [$this, 'savePost']);
+        add_action('wp_ajax_ozplugin_delete_post', [$this, 'deletePost']);
+        add_action('wp_ajax_ozplugin_restore_post', [$this, 'restorePost']);
+        //add_action('wp_ajax_ozplugin_search', [$this, 'search']); // todo make async select fields
     }
 
     /**
@@ -207,7 +230,7 @@ class Settings
      */
     public function save()
     {
-        if (wp_doing_ajax() && wp_verify_nonce($_POST['_wpnonce'], 'ozplugin-nonce')) {
+        if ($this->canDoThis()) {
             if (apply_filters('ozplugin_canSaveSettings', true)) {
                 $name = sanitize_text_field($_POST['name']);
                 // if option is array. for each key in array like option_name[suboption][subsuboption]
@@ -416,6 +439,8 @@ class Settings
             'wrongpagetype' => 'Wrong page type. Please choose page type to view this page',
             'nosettingsthistab' => 'No settings in this tab.',
             'copied' => 'Copied',
+            'addnew' => __('Add New'),
+            'somethingwentwrong' => __('Something went wrong')
         ];
     }
 
@@ -471,5 +496,480 @@ class Settings
         } else {
             return get_option($name, $def);
         }
+    }
+    
+    /**
+     * Format post data to table
+     *
+     * @param  string $post_type Post type
+     * @param  array $columns columns with data
+     * @param  array $args additional params
+     * @return array
+     */
+    public function toTable($post_type = false, $columns = [], $args = [])
+    {
+        if (!$columns || !$post_type) return [];
+        $posts_per_page = isset($args['posts_per_page']) ? (int)($args['posts_per_page']) : 3;
+        $post_status = isset($args['post_status']) ? $args['post_status'] : 'publish';
+        $paged = isset($args['paged']) ? (int)($args['paged']) : 1;
+        $args = [
+            'post_type' => $post_type,
+            'post_status' => $post_status == 'publish' ? $post_status : ['draft', 'trash'],
+            'posts_per_page' => $posts_per_page,
+            'paged' => $paged
+        ];
+        $posts = new WP_Query($args);
+        $isLastPage = $paged * $posts_per_page > $posts->found_posts;
+        if ($posts->have_posts()) {
+            $ans = [];
+            while ($posts->have_posts()) {
+                $posts->the_post();
+                $tr = [];
+                if (!isset($columns['post_status'])) {
+                    $columns['post_status'] = [
+                        'col' => 'post_status',
+                        'name' => __('Post Status', 'oz-donator'),
+                        'hidden' => true
+                    ];
+                }
+                foreach ($columns as $key => $column) {
+                    $val = '';
+                    $type = isset($column['type']) ?: '';
+                    switch ($type) {
+                        case '':
+                            switch ($column['col']) {
+                                case 'ID':
+                                    $val = get_the_ID();
+                                    break;
+                                case 'post_title':
+                                    $val = get_the_title();
+                                    break;
+                                case 'post_status':
+                                    $val = get_post_status();
+                                    break;
+                                case 'post_date':
+                                    $val = get_the_date(get_option('date_format') . ' h:i a');
+                                    break;
+                            }
+                            break;
+                        case 'meta':
+                            $val = get_post_meta(get_the_ID(), sanitize_key($column['col']), true);
+                            break;
+                        default:
+                            $val = '';
+                    }
+                    $tr[sanitize_key($key)] = apply_filters(static::PREFIX . 'column_value', $val, $column);
+                }
+
+                $ans[] = $tr;
+            }
+            return [
+                'table' => $ans,
+                'data' => [
+                    'isLastPage' => $isLastPage,
+                    'found' => $posts->found_posts
+                ]
+            ];
+        }
+        return [];
+    }
+
+    /**
+     * Return WP Posts for table interface
+     *
+     * @return void
+     */
+    public function getTable()
+    {
+        if ($this->canDoThis()) {
+            $columns = isset($_POST['columns']) ? json_decode(stripslashes($_POST['columns']), 1) : [];
+            $args = isset($_POST['args']) ? json_decode(stripslashes($_POST['args']), 1) : [];
+            $post_type = sanitize_text_field($_POST['post_type']);
+            $table = $this->toTable($post_type, $columns, $args);
+            echo json_encode([
+                'success' => !empty($table),
+                'payload' => $table
+            ]);
+        }
+        wp_die();
+    }
+    
+    /**
+     * Find nested array by key
+     *
+     * @param  string $search Key name
+     * @param  array $lists Array where need to search
+     * @param  array $conditions additional params
+     * @param  array $next_key next array on the same level
+     * @return array|false
+     */
+    public static function findNestedArrayByKey($search, $lists = [], $conditions = [], $next_key = [])
+    {
+        if (!is_array($lists)) return false;
+        $i = 0;
+        foreach (array_keys($lists) as $value) {
+
+            if ($value !== $search) {
+                if (is_array($lists[$value])) {
+                    $next_key = isset(array_keys($lists)[$i + 1]) ? $lists[array_keys($lists)[$i + 1]] : [];
+                    $ans = self::findNestedArrayByKey($search, $lists[$value], $conditions, $next_key);
+                    if (!$ans) continue;
+                    else return $ans;
+                } else {
+                    continue;
+                }
+            } else {
+                if (is_array($lists[$value])) {
+                    if (empty($conditions)) {
+                        return $lists[$value];
+                    } else {
+                        $matches = 0;
+                        foreach (array_keys($conditions) as $key) {
+                            if (isset($lists[$value][$key]) && $lists[$value][$key] == $conditions[$key]) {
+                                $matches++;
+                            }
+                        }
+                        if ($matches == count($conditions)) {
+                            return $lists[$value];
+                        } else {
+                            // search on same level but in next array
+                            //return !empty($next_key) ?  self::findNestedArrayByKey($search, $next_key, $conditions) : false;
+                            //$ans = self::findNestedArrayByKey($search, $next_key, $conditions);
+                            continue;
+                        }
+                    }
+                }
+                return is_array($lists[$value]) ? $lists[$value] : false;
+            }
+            $i++;
+        }
+
+        return false;
+    }
+    
+    /**
+     * Do not show field on edit post form if does not meet conditions
+     *
+     * @param  array $field current edit field
+     * @param  array $fields all edit fields
+     * @return bool
+     */
+    public function IsMeetsCondition($field, $fields)
+    {
+        global $post;
+        $conditions = $field['condition'];
+        $matches = 0;
+        foreach ($conditions as $condition) {
+            $fil = array_filter($fields, function ($val) use ($condition, &$matches, $post) {
+                if (isset($val['name']) && $val['name'] == $condition['key']) {
+                    $val = $this->getValue($val, $post);
+                    if ($val == $condition['value']) {
+                        $matches++;
+                    }
+                }
+            });
+        }
+        return $matches == count($conditions);
+    }
+    
+    /**
+     * Fill in edit fields
+     *
+     * @param  WP_Post $one_post Post 
+     * @param  string $post_type Post type
+     * @return array
+     */
+    public function toPost($one_post, $post_type)
+    {
+        if (!$one_post || !$post_type) return false;
+        $fields = self::findNestedArrayByKey('view', $this->setOptions(), ['post_type' => $post_type]);
+        global $post;
+        $post = $one_post;
+        setup_postdata($post);
+        if ($post_type == $fields['post_type']) {
+            foreach ($fields['edit_post'] as $keys => &$edit_post) {
+                if ($edit_post['fields']) {
+                    foreach ($edit_post['fields'] as $key => $field) {
+                        if ($field['type'] != 'html') {
+                            if (isset($edit_post['fields'][$key]['condition']) && !empty($edit_post['fields'][$key]['condition'])) {
+                                $arr = [];
+                                $arr = array_column($fields['edit_post'], 'fields');
+                                $arr = array_merge(...$arr);
+                                if (!$this->IsMeetsCondition($edit_post['fields'][$key], $arr)) {
+                                    continue;
+                                }
+                            }
+                            $edit_post['fields'][$key]['value'] = apply_filters(static::PREFIX . 'edit_post_value', $this->getValue($field, $post), $field);
+                            //$edit_post['fields'][$key]['value'] = $key;
+                        }
+                    }
+                }
+            }
+            return $fields['edit_post'];
+        }
+        wp_reset_postdata();
+        return $fields['edit_post'];
+    }
+    
+    /**
+     * Echoing json array with post data
+     *
+     * @return void
+     */
+    public function getPost()
+    {
+        if ($this->canDoThis()) {
+            $post_id = isset($_POST['ID']) ? (int)($_POST['ID']) : 0;
+            $post_type = isset($_POST['post_type']) ? sanitize_text_field($_POST['post_type']) : 0;
+            global $post;
+            $post = get_post($post_id);
+            echo json_encode([
+                'success' => true,
+                'payload' => $this->toPost($post, $post_type),
+            ]);
+        }
+        wp_die();
+    }
+    
+    /**
+     * Save post and echoing json array with saving results
+     *
+     * @return void
+     */
+    public function savePost()
+    {
+        if ($this->canDoThis()) {
+
+            $data = $_POST['payload'] ? json_decode(stripslashes($_POST['payload']), 1) : [];
+            $this->data = [];
+            $this->payload = false;
+            foreach ($data as $dat) {
+                $this->name = $dat['name'];
+                $this->value = $dat['value'];
+                $this->type = isset($dat['data_validation']) ? $dat['data_validation'] : '';
+                $this->field_type = isset($dat['data_type']) ? $dat['data_type'] : 'main';
+                $this->sanitizingAndProcessing();
+            }
+
+            $this->data['post_type'] = isset($_POST['post_type']) ? sanitize_text_field($_POST['post_type']) : '';
+            $this->data['post_status'] = 'publish';
+
+            if (!isset($this->data['post_title']) || !$this->data['post_title']) {
+                $this->data['post_title'] = wp_hash(time());
+            }
+
+            $id = wp_insert_post(apply_filters('ozdon_pre_data', $this->data), true);
+
+            echo json_encode([
+                'success' => !is_wp_error($id),
+                'payload' => is_wp_error($id) ? $id->get_error_message() : $id,
+            ]);
+        }
+        wp_die();
+    }
+    
+    /**
+     * Delete post and echoing json array with deleting results
+     *
+     * @return void
+     */
+    public function deletePost()
+    {
+        if ($this->canDoThis()) {
+            $id = isset($_POST['ID']) ? (int)($_POST['ID']) : 0;
+            if ($id) {
+                $delete = wp_trash_post($id);
+                echo json_encode([
+                    'success' => !empty($delete) && $delete != false,
+                    'payload' => $delete,
+                ]);
+            }
+        }
+        wp_die();
+    }
+    
+    /**
+     * Return post from trash and echoing json array with results
+     *
+     * @return void
+     */
+    public function restorePost()
+    {
+        if ($this->canDoThis()) {
+            $id = isset($_POST['ID']) ? (int)($_POST['ID']) : 0;
+            if ($id) {
+                add_filter('wp_untrash_post_status', [$this, 'returnPublish']);
+                $delete = wp_untrash_post($id);
+                remove_filter('wp_untrash_post_status', [$this, 'returnPublish']);
+                echo json_encode([
+                    'success' => !empty($delete) && $delete != false,
+                    'payload' => $delete,
+                ]);
+            }
+        }
+        wp_die();
+    }
+    
+    /**
+     * Filter post status to publish when wp_untrash_post function work
+     *
+     * @param  mixed $status
+     * @return void
+     */
+    public function returnPublish($status)
+    {
+        return 'publish';
+    }
+    
+    /**
+     * Sanitizing and processing input data
+     *
+     * @return void
+     */
+    public function sanitizingAndProcessing()
+    {
+        // sanitizing
+        switch ($this->type) {
+            case 'boolean':
+                $this->value = $this->value == 'true';
+                break;
+            case 'int':
+                $this->value = (int)($this->value);
+                break;
+            default:
+                $this->value = sanitize_text_field($this->value);
+        }
+
+        if (isset($this->post_id)) {
+            $this->data['ID'] = $this->post_id;
+            $old_post = get_post($this->post_id);
+            if ($old_post)
+                $this->data['post_status'] = $old_post->post_status;
+            $this->data['post_type'] = $old_post->post_type;
+        }
+        switch ($this->field_type) {
+            case 'main':
+                switch ($this->name) {
+                    case 'post_title':
+                        $this->data['post_title'] = $this->value;
+                        break;
+                }
+                break;
+            case 'meta':
+                if (isset($this->post_id) && $this->post_id) :
+                    update_post_meta($this->post_id, $this->name, $this->value);
+                    $this->payload = true;
+                endif;
+                $this->data['meta_input'][$this->name] = $this->value;
+                break;
+        }
+    }
+    
+    /**
+     * Save post data
+     *
+     * @return void
+     */
+    public function savePostData()
+    {
+        if ($this->canDoThis()) {
+            $this->post_id = isset($_POST['ID']) ? (int)($_POST['ID']) : 0;
+            $this->name = isset($_POST['name']) ? sanitize_key($_POST['name']) : '';
+            $this->value = isset($_POST['value']) ? $_POST['value'] : '';
+            $this->type = isset($_POST['type']) ? $_POST['type'] : '';
+            $this->field_type = isset($_POST['data_type']) ? sanitize_text_field($_POST['data_type']) : 'main';
+            $this->payload = false;
+            $this->data = [];
+
+
+            $this->sanitizingAndProcessing();
+
+
+
+            $id = !$this->payload ? wp_insert_post(apply_filters('ozdon_pre_data', $this->data), true) : $this->payload;
+            echo json_encode([
+                'success' => !is_wp_error($id),
+                'payload' => !is_wp_error($id) ? $id : $id->get_error_message(),
+            ]);
+        }
+        wp_die();
+    }
+    
+    /**
+     * getValue
+     *
+     * @param  array $field Field
+     * @param  WP_Post $post Post
+     * @return mixed
+     */
+    public function getValue($field, $post)
+    {
+        switch ($field['name']) {
+            case 'ID':
+                $val = get_the_ID();
+                break;
+            case 'post_title':
+                $val = get_the_title();
+                break;
+            case 'post_date':
+                $val = get_the_date();
+                break;
+            default:
+                $val = get_post_meta(get_the_ID(), $field['name'], true);
+        }
+        $field['value'] = $val ?: $field['value'];
+
+        return $field['value'];
+    }
+
+    /**
+     * todo make async select fields
+     *
+     * @return void
+     */
+    public function search()
+    {
+        if ($this->canDoThis()) {
+            $type = isset($_POST['type']) ? $_POST['type'] : '';
+            $word = isset($_POST['word']) ? $_POST['word'] : '';
+            $ans = [];
+            $query = false;
+            switch ($type) {
+                case '':
+                    break;
+                default:
+                    $query = [
+                        's' => sanitize_text_field($word)
+                    ];
+                    $ans = $this->WP_Query_toSelect($query);
+            }
+            echo json_encode([
+                'success' => true,
+                'payload' => !empty($ans) && !is_wp_error($query) ? $ans : [],
+            ]);
+        }
+        wp_die();
+    }
+    
+    /**
+     * todo search results to select field
+     *
+     * @param  mixed $query
+     * @return void
+     */
+    private function WP_Query_toSelect($query)
+    {
+        $query = new WP_Query($query);
+        $ans = [];
+        if ($query->have_posts()) {
+            while ($query->have_posts()) {
+                $query->the_post();
+                $ans[] = [
+                    'label' => get_the_title(),
+                    'value' => get_the_ID(),
+                ];
+            }
+        }
+        return $ans;
     }
 }
