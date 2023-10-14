@@ -4,13 +4,14 @@
  * @author    Ozplugin <client@oz-plugin.ru>
  * @link      https://oz-plugin.com/
  * @copyright 2023 Ozplugin
- * @ver 1.1
+ * @ver 1.2
  */
 
 namespace Ozplugin\Core;
 
 use WP_Error;
 use WP_Query;
+use WP_User_Query;
 
 /**
  * settings structure
@@ -151,6 +152,9 @@ class Settings
     {
         $options = [];
         $options = array_merge($options, $this->setOptions());
+        $pages = $options['pages'];
+        array_multisort($pages, SORT_NUMERIC, array_column($pages, 'order'));
+        $options['pages'] = $pages;
         return apply_filters(static::PREFIX . 'plugin_settings', $options);
     }
 
@@ -400,6 +404,7 @@ class Settings
                     'variant' => 'warning',
                     'text' => 'custom notice'
                 ],
+                'datetimeFormat' => 'MM/dd/yy hh:mm a'
             ];
             wp_localize_script(static::PREFIX . 'settings', 'ozplugin_vars', apply_filters(static::PREFIX . 'plugin_vars', $vars));
             wp_localize_script(static::PREFIX . 'settings', 'ozplugin_lang', apply_filters(static::PREFIX . 'plugin_lang', $lang));
@@ -451,7 +456,7 @@ class Settings
      * @param  string $option_name Option name
      * @return string html code
      */
-    public static function Editor($text = '', $option_name = '')
+    public static function Editor($text = '', $option_name = '', $tpl_name = '')
     {
         $hash = wp_hash($option_name);
         ob_start();
@@ -472,7 +477,7 @@ class Settings
             ]
         );
 ?>
-        <div data-option="<?php echo $option_name; ?>" data-id="<?php echo $option_name; ?>_editor" class="oz_set_defemail btn btn-primary btn-sm my-2"><?php _e('Load default template', 'oz-donator'); ?></div>
+        <div data-option="<?php echo $option_name; ?>" data-id="<?php echo $hash; ?>" data-name="<?php echo $tpl_name; ?>" class="oz_set_defemail btn btn-primary btn-sm my-2"><?php _e('Load default template', 'oz-donator'); ?></div>
 <?php
         $editor = ob_get_clean();
         return $editor;
@@ -497,7 +502,7 @@ class Settings
             return get_option($name, $def);
         }
     }
-    
+
     /**
      * Format post data to table
      *
@@ -506,7 +511,7 @@ class Settings
      * @param  array $args additional params
      * @return array
      */
-    public function toTable($post_type = false, $columns = [], $args = [])
+    public function toTable($post_type = false, $columns = [], $args = [], $filter = [])
     {
         if (!$columns || !$post_type) return [];
         $posts_per_page = isset($args['posts_per_page']) ? (int)($args['posts_per_page']) : 3;
@@ -518,6 +523,29 @@ class Settings
             'posts_per_page' => $posts_per_page,
             'paged' => $paged
         ];
+        if ($filter) {
+            foreach ($filter as $fil) {
+                $val = $fil['value'];
+                switch ($fil['validation']) {
+                    case 'number':
+                        $val = (int)($val);
+                        break;
+                    default:
+                        $val = sanitize_text_field($val);
+                }
+                switch ($fil['type']) {
+                    case 'meta':
+                        if (!isset($args['meta_query'])) {
+                            $args['meta_query'] = [];
+                        }
+                        $args['meta_query'][] = [
+                            'key' => sanitize_key($fil['filter']),
+                            'value' => $val
+                        ];
+                        break;
+                }
+            }
+        }
         $posts = new WP_Query($args);
         $isLastPage = $paged * $posts_per_page > $posts->found_posts;
         if ($posts->have_posts()) {
@@ -534,7 +562,7 @@ class Settings
                 }
                 foreach ($columns as $key => $column) {
                     $val = '';
-                    $type = isset($column['type']) ?: '';
+                    $type = isset($column['type']) ? $column['type'] : '';
                     switch ($type) {
                         case '':
                             switch ($column['col']) {
@@ -555,6 +583,29 @@ class Settings
                         case 'meta':
                             $val = get_post_meta(get_the_ID(), sanitize_key($column['col']), true);
                             break;
+                        case 'posts':
+                            $post_type = sanitize_key($column['col']);
+                            $args = [
+                                'post_type' => $post_type,
+                                'post_status' => 'publish',
+                                'posts_per_page' => -1,
+                                'meta_query' => [
+                                    [
+                                        'key' => sanitize_key($column['relation_meta']),
+                                        'value' => get_the_ID(),
+                                    ]
+                                ]
+                            ];
+                            if (isset($column['args'])) {
+                                if (isset($column['args']['meta_query'])) {
+                                    $meta = array_merge($args['meta_query'], $column['args']['meta_query']);
+                                    $column['args']['meta_query'] = $meta;
+                                }
+                                $args = array_merge($args, $column['args']);
+                            }
+                            $found_posts = get_posts($args);
+                            $val = count($found_posts);
+                            break;
                         default:
                             $val = '';
                     }
@@ -573,6 +624,99 @@ class Settings
         }
         return [];
     }
+    
+    /**
+     * Fromat user data to table
+     *
+     * @param  string $role User rolw
+     * @param  array $columns Table columns
+     * @param  array $args
+     * @param  array $filter filter posts by this filter
+     * @return array [table, data]
+     */
+    public function UsersToTable($role = false, $columns = [], $args = [], $filter = [])
+    {
+        if (!$columns || !$role) return [];
+        $posts_per_page = isset($args['posts_per_page']) ? (int)($args['posts_per_page']) : 3;
+        $paged = isset($args['paged']) ? (int)($args['paged']) : 1;
+        $args1 = [
+            'role__in' => $role ? [$role] : [],
+            //'post_status' => $post_status == 'publish' ? $post_status : ['draft', 'trash'],
+            'number' => $posts_per_page,
+            'orderby' => isset($args['orderby']) ? sanitize_text_field($args['orderby']) : 'ID',
+            'order' => isset($args['order']) && $args['order'] == 'ASC' ? 'ASC' : 'DESC',
+            'paged' => $paged
+        ];
+        $users = new WP_User_Query($args1);
+        $results = $users->get_results();
+        $count = $users->get_total();
+        $isLastPage = $paged * $posts_per_page > $count;
+        $ans = [];
+        if (!empty($results)) {
+            foreach ($results as $result) {
+                $tr = [];
+                foreach ($columns as $key => $column) {
+                    $type = isset($column['type']) ? $column['type'] : '';
+                    $val = '';
+                    switch ($type) {
+                        case '':
+                            switch ($column['col']) {
+                                case 'ID':
+                                    $val = $result->ID;
+                                    break;
+                                case 'user_login':
+                                    $val = $result->user_login;
+                                    break;
+                                case 'user_email':
+                                    $val = $result->user_email;
+                                    break;
+                                default:
+                                    $val = $result->has_prop($column['col']) ? $result->get($column['col']) : '';
+                            }
+                            break;
+                        case 'meta':
+                            $val = get_user_meta($result->ID, sanitize_key($column['col']), true);
+                            break;
+                        case 'posts':
+                            $post_type = sanitize_key($column['col']);
+                            $args = [
+                                'post_type' => $post_type,
+                                'post_status' => 'publish',
+                                'posts_per_page' => -1,
+                                'meta_query' => [
+                                    [
+                                        'key' => sanitize_key($column['relation_meta']),
+                                        'value' => $result->ID,
+                                    ]
+                                ]
+                            ];
+                            if (isset($column['args'])) {
+                                if (isset($column['args']['meta_query'])) {
+                                    $meta = array_merge($args['meta_query'], $column['args']['meta_query']);
+                                    $column['args']['meta_query'] = $meta;
+                                }
+                                $args = array_merge($args, $column['args']);
+                            }
+                            $found_posts = get_posts($args);
+                            $val = count($found_posts);
+                            break;
+                        default:
+                            $val = '';
+                    }
+                    $tr[sanitize_key($key)] = apply_filters(static::PREFIX . 'user_column_value', $val, $column);
+                }
+                $ans[] = $tr;
+            }
+            return [
+                'table' => $ans,
+                'data' => [
+                    'isLastPage' => $isLastPage,
+                    'found' => $count
+                ]
+            ];
+        }
+        return $ans;
+    }
 
     /**
      * Return WP Posts for table interface
@@ -584,8 +728,13 @@ class Settings
         if ($this->canDoThis()) {
             $columns = isset($_POST['columns']) ? json_decode(stripslashes($_POST['columns']), 1) : [];
             $args = isset($_POST['args']) ? json_decode(stripslashes($_POST['args']), 1) : [];
-            $post_type = sanitize_text_field($_POST['post_type']);
-            $table = $this->toTable($post_type, $columns, $args);
+            $filter = isset($_POST['filter']) ? json_decode(stripslashes($_POST['filter']), 1) : [];
+            $post_type = isset($_POST['post_type']) ? sanitize_text_field($_POST['post_type']) : '';
+            $users_role = isset($_POST['role']) ? sanitize_text_field($_POST['role']) : '';
+            if ($post_type)
+                $table = $this->toTable($post_type, $columns, $args, $filter);
+            else if ($users_role)
+                $table = $this->UsersToTable($users_role, $columns, $args, $filter);
             echo json_encode([
                 'success' => !empty($table),
                 'payload' => $table
@@ -593,7 +742,7 @@ class Settings
         }
         wp_die();
     }
-    
+
     /**
      * Find nested array by key
      *
@@ -646,7 +795,7 @@ class Settings
 
         return false;
     }
-    
+
     /**
      * Do not show field on edit post form if does not meet conditions
      *
@@ -671,7 +820,7 @@ class Settings
         }
         return $matches == count($conditions);
     }
-    
+
     /**
      * Fill in edit fields
      *
@@ -712,6 +861,41 @@ class Settings
     }
     
     /**
+     * Fill in edit fields for user
+     *
+     * @param  string $users_role User role
+     * @param  int $user_id User ID
+     * @return array
+     */
+    public function UserToPost($users_role, $user_id)
+    {
+        $fields = self::findNestedArrayByKey('view', $this->setOptions(), ['role' => $users_role]);
+        $user = get_user_by('ID', $user_id);
+        if ($users_role == $fields['role']) {
+            foreach ($fields['edit_post'] as $keys => &$edit_post) {
+                if ($edit_post['fields']) {
+                    foreach ($edit_post['fields'] as $key => $field) {
+                        if ($field['type'] != 'html') {
+                            if (isset($edit_post['fields'][$key]['condition']) && !empty($edit_post['fields'][$key]['condition'])) {
+                                $arr = [];
+                                $arr = array_column($fields['edit_post'], 'fields');
+                                $arr = array_merge(...$arr);
+                                if (!$this->IsMeetsCondition($edit_post['fields'][$key], $arr)) {
+                                    continue;
+                                }
+                            }
+                            $edit_post['fields'][$key]['value'] = apply_filters(static::PREFIX . 'edit_user_value', $this->getUserValue($field, $user), $field);
+                            //$edit_post['fields'][$key]['value'] = $key;
+                        }
+                    }
+                }
+            }
+            return $fields['edit_post'];
+        }
+        return $fields['edit_post'];
+    }
+
+    /**
      * Echoing json array with post data
      *
      * @return void
@@ -721,16 +905,22 @@ class Settings
         if ($this->canDoThis()) {
             $post_id = isset($_POST['ID']) ? (int)($_POST['ID']) : 0;
             $post_type = isset($_POST['post_type']) ? sanitize_text_field($_POST['post_type']) : 0;
-            global $post;
-            $post = get_post($post_id);
+            $users_role = isset($_POST['role']) ? sanitize_text_field($_POST['role']) : '';
+            if ($post_type) {
+                global $post;
+                $post = get_post($post_id);
+                $payload = $this->toPost($post, $post_type);
+            } else if ($users_role) {
+                $payload = $this->UserToPost($users_role, $post_id);
+            }
             echo json_encode([
                 'success' => true,
-                'payload' => $this->toPost($post, $post_type),
+                'payload' => $payload,
             ]);
         }
         wp_die();
     }
-    
+
     /**
      * Save post and echoing json array with saving results
      *
@@ -767,7 +957,7 @@ class Settings
         }
         wp_die();
     }
-    
+
     /**
      * Delete post and echoing json array with deleting results
      *
@@ -787,7 +977,7 @@ class Settings
         }
         wp_die();
     }
-    
+
     /**
      * Return post from trash and echoing json array with results
      *
@@ -809,7 +999,7 @@ class Settings
         }
         wp_die();
     }
-    
+
     /**
      * Filter post status to publish when wp_untrash_post function work
      *
@@ -820,7 +1010,7 @@ class Settings
     {
         return 'publish';
     }
-    
+
     /**
      * Sanitizing and processing input data
      *
@@ -864,7 +1054,7 @@ class Settings
                 break;
         }
     }
-    
+
     /**
      * Save post data
      *
@@ -894,7 +1084,7 @@ class Settings
         }
         wp_die();
     }
-    
+
     /**
      * getValue
      *
@@ -918,6 +1108,20 @@ class Settings
                 $val = get_post_meta(get_the_ID(), $field['name'], true);
         }
         $field['value'] = $val ?: $field['value'];
+
+        return $field['value'];
+    }
+
+    /**
+     * getValue
+     *
+     * @param  array $field Field
+     * @param  WP_Post $post Post
+     * @return mixed
+     */
+    public function getUserValue($field, $user)
+    {
+        $field['value'] = $user->has_prop($field['name']) ? $user->get($field['name']) : '';
 
         return $field['value'];
     }
@@ -950,7 +1154,7 @@ class Settings
         }
         wp_die();
     }
-    
+
     /**
      * todo search results to select field
      *
